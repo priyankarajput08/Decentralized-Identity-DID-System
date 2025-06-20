@@ -1,1 +1,206 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
 
+/**
+ * @title Decentralized Identity (DID) System
+ * @dev A smart contract for managing decentralized identities and verifiable credentials
+ * @author DID Team
+ */
+contract DecentralizedIdentitySystem {
+    
+    // Struct to represent a DID document
+    struct DIDDocument {
+        address owner;
+        string publicKey;
+        string serviceEndpoint;
+        uint256 createdAt;
+        uint256 updatedAt;
+        bool isActive;
+    }
+    
+    // Struct to represent a verifiable credential
+    struct Credential {
+        string credentialType;
+        address issuer;
+        address subject;
+        string credentialData;
+        uint256 issuedAt;
+        uint256 expiresAt;
+        bool isRevoked;
+    }
+    
+    // Mappings
+    mapping(address => DIDDocument) public didDocuments;
+    mapping(bytes32 => Credential) public credentials;
+    mapping(address => bytes32[]) public userCredentials;
+    mapping(address => bool) public authorizedIssuers;
+    
+    // Events
+    event DIDCreated(address indexed owner, uint256 timestamp);
+    event DIDUpdated(address indexed owner, uint256 timestamp);
+    event CredentialIssued(bytes32 indexed credentialId, address indexed issuer, address indexed subject);
+    event CredentialRevoked(bytes32 indexed credentialId, address indexed issuer);
+    event IssuerAuthorized(address indexed issuer, address indexed authorizer);
+    
+    // Modifiers
+    modifier onlyDIDOwner(address didOwner) {
+        require(msg.sender == didOwner, "Only DID owner can perform this action");
+        require(didDocuments[didOwner].isActive, "DID is not active");
+        _;
+    }
+    
+    modifier onlyAuthorizedIssuer() {
+        require(authorizedIssuers[msg.sender], "Not an authorized issuer");
+        _;
+    }
+    
+    modifier validCredential(bytes32 credentialId) {
+        require(credentials[credentialId].issuer != address(0), "Credential does not exist");
+        require(!credentials[credentialId].isRevoked, "Credential has been revoked");
+        require(block.timestamp <= credentials[credentialId].expiresAt, "Credential has expired");
+        _;
+    }
+    
+    /**
+     * @dev Creates a new DID document for the caller
+     * @param _publicKey The public key associated with the DID
+     * @param _serviceEndpoint The service endpoint for the DID
+     */
+    function createDID(string memory _publicKey, string memory _serviceEndpoint) external {
+        require(!didDocuments[msg.sender].isActive, "DID already exists for this address");
+        require(bytes(_publicKey).length > 0, "Public key cannot be empty");
+        
+        didDocuments[msg.sender] = DIDDocument({
+            owner: msg.sender,
+            publicKey: _publicKey,
+            serviceEndpoint: _serviceEndpoint,
+            createdAt: block.timestamp,
+            updatedAt: block.timestamp,
+            isActive: true
+        });
+        
+        emit DIDCreated(msg.sender, block.timestamp);
+    }
+    
+    /**
+     * @dev Issues a verifiable credential to a subject
+     * @param _credentialType The type of credential being issued
+     * @param _subject The address of the credential subject
+     * @param _credentialData The credential data (could be hash of actual data)
+     * @param _expiresAt The expiration timestamp of the credential
+     * @return credentialId The unique identifier for the issued credential
+     */
+    function issueCredential(
+        string memory _credentialType,
+        address _subject,
+        string memory _credentialData,
+        uint256 _expiresAt
+    ) external onlyAuthorizedIssuer returns (bytes32) {
+        require(didDocuments[_subject].isActive, "Subject does not have an active DID");
+        require(_expiresAt > block.timestamp, "Expiration date must be in the future");
+        require(bytes(_credentialType).length > 0, "Credential type cannot be empty");
+        require(bytes(_credentialData).length > 0, "Credential data cannot be empty");
+        
+        bytes32 credentialId = keccak256(
+            abi.encodePacked(
+                msg.sender,
+                _subject,
+                _credentialType,
+                _credentialData,
+                block.timestamp
+            )
+        );
+        
+        credentials[credentialId] = Credential({
+            credentialType: _credentialType,
+            issuer: msg.sender,
+            subject: _subject,
+            credentialData: _credentialData,
+            issuedAt: block.timestamp,
+            expiresAt: _expiresAt,
+            isRevoked: false
+        });
+        
+        userCredentials[_subject].push(credentialId);
+        
+        emit CredentialIssued(credentialId, msg.sender, _subject);
+        return credentialId;
+    }
+    
+    /**
+     * @dev Verifies if a credential is valid and authentic
+     * @param _credentialId The ID of the credential to verify
+     * @return isValid Whether the credential is valid
+     * @return issuer The address of the credential issuer
+     * @return subject The address of the credential subject
+     * @return credentialType The type of the credential
+     */
+    function verifyCredential(bytes32 _credentialId) 
+        external 
+        view 
+        validCredential(_credentialId)
+        returns (
+            bool isValid,
+            address issuer,
+            address subject,
+            string memory credentialType
+        ) 
+    {
+        Credential memory cred = credentials[_credentialId];
+        return (true, cred.issuer, cred.subject, cred.credentialType);
+    }
+    
+    // Additional utility functions
+    
+    /**
+     * @dev Updates DID document (only by owner)
+     */
+    function updateDID(string memory _publicKey, string memory _serviceEndpoint) 
+        external 
+        onlyDIDOwner(msg.sender) 
+    {
+        require(bytes(_publicKey).length > 0, "Public key cannot be empty");
+        
+        didDocuments[msg.sender].publicKey = _publicKey;
+        didDocuments[msg.sender].serviceEndpoint = _serviceEndpoint;
+        didDocuments[msg.sender].updatedAt = block.timestamp;
+        
+        emit DIDUpdated(msg.sender, block.timestamp);
+    }
+    
+    /**
+     * @dev Revokes a credential (only by issuer)
+     */
+    function revokeCredential(bytes32 _credentialId) external {
+        require(credentials[_credentialId].issuer == msg.sender, "Only issuer can revoke credential");
+        require(!credentials[_credentialId].isRevoked, "Credential already revoked");
+        
+        credentials[_credentialId].isRevoked = true;
+        
+        emit CredentialRevoked(_credentialId, msg.sender);
+    }
+    
+    /**
+     * @dev Authorizes an issuer (for demo purposes, in production this would have more sophisticated governance)
+     */
+    function authorizeIssuer(address _issuer) external {
+        require(_issuer != address(0), "Invalid issuer address");
+        authorizedIssuers[_issuer] = true;
+        
+        emit IssuerAuthorized(_issuer, msg.sender);
+    }
+    
+    /**
+     * @dev Gets user's credentials
+     */
+    function getUserCredentials(address _user) external view returns (bytes32[] memory) {
+        return userCredentials[_user];
+    }
+    
+    /**
+     * @dev Checks if an address has an active DID
+     */
+    function hasDID(address _address) external view returns (bool) {
+        return didDocuments[_address].isActive;
+    }
+}
